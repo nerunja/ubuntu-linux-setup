@@ -1,0 +1,783 @@
+---
+# Ubuntu Server 1TB NVMe LVM Partitioning Setup Guide
+# System: Ubuntu Server with LVM and Swap File
+# Created: 2025-12-07
+# Storage: 1TB NVMe Drive
+
+metadata:
+  title: "Ubuntu Server 1TB NVMe LVM Setup with Swap File"
+  version: "1.0"
+  author: "Claude AI Assistant"
+  date: "2025-12-07"
+  description: "Comprehensive guide for setting up Ubuntu Server on 1TB NVMe with LVM partitioning and file-based swap"
+
+system_specifications:
+  storage:
+    device: "/dev/nvme0n1"
+    capacity: "1TB"
+    type: "NVMe SSD"
+  memory:
+    ram: "64GB"
+    vram: "16GB (NVIDIA RTX 5060 Ti)"
+  operating_system: "Ubuntu Server (22.04 LTS or newer)"
+  partition_table: "GPT"
+  volume_management: "LVM2"
+  swap_type: "File-based (recommended for flexibility)"
+
+partition_layout:
+  overview: |
+    /dev/nvme0n1 (1TB)
+    ├── nvme0n1p1    1GB      /boot/efi  (ESP, FAT32)
+    ├── nvme0n1p2    2GB      /boot      (ext4)
+    └── nvme0n1p3    997GB    (LVM PV)
+        └── vg0      997GB    (Volume Group)
+            ├── root   40GB   /          (ext4)
+            ├── var    200GB  /var       (ext4)
+            ├── home   100GB  /home      (ext4)
+            └── free   657GB  (unallocated for future use)
+    
+    Swap: 8GB swap file at /swapfile (on root partition)
+
+  partitions:
+    - partition: "/dev/nvme0n1p1"
+      size: "1GB"
+      type: "EFI System Partition (ESP)"
+      filesystem: "FAT32"
+      mount_point: "/boot/efi"
+      flags: "esp, boot"
+      purpose: "UEFI bootloader files"
+      
+    - partition: "/dev/nvme0n1p2"
+      size: "2GB"
+      type: "Linux filesystem"
+      filesystem: "ext4"
+      mount_point: "/boot"
+      purpose: "Kernel, initramfs, GRUB files"
+      
+    - partition: "/dev/nvme0n1p3"
+      size: "~997GB"
+      type: "Linux LVM"
+      purpose: "LVM Physical Volume containing all logical volumes"
+
+  logical_volumes:
+    volume_group: "vg0"
+    physical_volume: "/dev/nvme0n1p3"
+    
+    volumes:
+      - name: "root"
+        size: "40GB"
+        filesystem: "ext4"
+        mount_point: "/"
+        device: "/dev/vg0/root"
+        mapper: "/dev/mapper/vg0-root"
+        purpose: "Root filesystem - OS, applications, system files"
+        
+      - name: "var"
+        size: "200GB"
+        filesystem: "ext4"
+        mount_point: "/var"
+        device: "/dev/vg0/var"
+        mapper: "/dev/mapper/vg0-var"
+        purpose: "Variable data - logs, databases, Docker containers, package cache"
+        
+      - name: "home"
+        size: "100GB"
+        filesystem: "ext4"
+        mount_point: "/home"
+        device: "/dev/vg0/home"
+        mapper: "/dev/mapper/vg0-home"
+        purpose: "User home directories and personal data"
+        
+      - name: "unallocated"
+        size: "657GB"
+        status: "Free space for future expansion"
+        purpose: "Reserve for creating new LVs or extending existing ones"
+
+  swap_configuration:
+    type: "Swap File (recommended)"
+    size: "8GB"
+    location: "/swapfile"
+    reasoning: |
+      With 64GB RAM, 8GB swap provides adequate safety buffer.
+      File-based swap offers maximum flexibility for resizing.
+      No performance penalty on NVMe drives.
+      Can easily adjust size without LVM operations.
+    swappiness: 10
+    note: "GPU VRAM (16GB) is managed separately by NVIDIA driver and doesn't affect swap sizing"
+
+installation_steps:
+  prerequisites:
+    - "Boot from Ubuntu Server installation media"
+    - "Have backup of any existing data"
+    - "Verify device name is /dev/nvme0n1 (use 'lsblk' command)"
+    - "Ensure system has network connectivity for package installation"
+
+  step_01_identify_drive:
+    description: "Identify and verify the NVMe drive"
+    commands:
+      - "lsblk"
+      - "sudo fdisk -l /dev/nvme0n1"
+      - "# WARNING: Verify device name before proceeding!"
+      - "# Replace /dev/nvme0n1 with your actual device if different"
+
+  step_02_install_tools:
+    description: "Install required partitioning tools"
+    commands:
+      - "sudo apt update"
+      - "sudo apt install parted gdisk lvm2 -y"
+
+  step_03_create_partitions:
+    description: "Create GPT partition table and partitions using gdisk"
+    method: "gdisk (recommended)"
+    commands:
+      - "sudo gdisk /dev/nvme0n1"
+      - ""
+      - "# Inside gdisk interactive prompt:"
+      - "# Create new GPT partition table"
+      - "Command: o"
+      - "Proceed? Y"
+      - ""
+      - "# Partition 1: EFI System Partition (1GB)"
+      - "Command: n"
+      - "Partition number: 1"
+      - "First sector: (press Enter for default)"
+      - "Last sector: +1G"
+      - "Hex code: EF00"
+      - ""
+      - "# Partition 2: /boot (2GB)"
+      - "Command: n"
+      - "Partition number: 2"
+      - "First sector: (press Enter for default)"
+      - "Last sector: +2G"
+      - "Hex code: 8300"
+      - ""
+      - "# Partition 3: LVM Physical Volume (remaining space)"
+      - "Command: n"
+      - "Partition number: 3"
+      - "First sector: (press Enter for default)"
+      - "Last sector: (press Enter for default - uses all remaining space)"
+      - "Hex code: 8E00"
+      - ""
+      - "# Verify partition table"
+      - "Command: p"
+      - ""
+      - "# Write changes to disk"
+      - "Command: w"
+      - "Do you want to proceed? Y"
+    
+    alternative_method: "parted"
+    alternative_commands:
+      - "sudo parted /dev/nvme0n1"
+      - "mklabel gpt"
+      - "mkpart primary fat32 1MiB 1025MiB"
+      - "set 1 esp on"
+      - "mkpart primary ext4 1025MiB 3073MiB"
+      - "mkpart primary ext4 3073MiB 100%"
+      - "set 3 lvm on"
+      - "print"
+      - "quit"
+
+  step_04_verify_partitions:
+    description: "Verify partition creation"
+    commands:
+      - "lsblk /dev/nvme0n1"
+      - "sudo fdisk -l /dev/nvme0n1"
+      - ""
+      - "# Expected output:"
+      - "# nvme0n1           1TB"
+      - "# ├─nvme0n1p1       1G   (EFI)"
+      - "# ├─nvme0n1p2       2G   (boot)"
+      - "# └─nvme0n1p3       ~997G (LVM)"
+
+  step_05_format_boot_partitions:
+    description: "Format EFI and boot partitions"
+    commands:
+      - "# Format EFI System Partition (FAT32)"
+      - "sudo mkfs.fat -F32 /dev/nvme0n1p1"
+      - ""
+      - "# Format boot partition (ext4 with label)"
+      - "sudo mkfs.ext4 -L boot /dev/nvme0n1p2"
+
+  step_06_setup_lvm_physical_volume:
+    description: "Create LVM Physical Volume"
+    commands:
+      - "# Initialize partition as LVM Physical Volume"
+      - "sudo pvcreate /dev/nvme0n1p3"
+      - ""
+      - "# Verify Physical Volume creation"
+      - "sudo pvdisplay"
+      - "sudo pvs"
+
+  step_07_create_volume_group:
+    description: "Create LVM Volume Group"
+    commands:
+      - "# Create Volume Group named 'vg0'"
+      - "sudo vgcreate vg0 /dev/nvme0n1p3"
+      - ""
+      - "# Verify Volume Group"
+      - "sudo vgdisplay vg0"
+      - "sudo vgs"
+
+  step_08_create_logical_volumes:
+    description: "Create Logical Volumes (no swap LV)"
+    commands:
+      - "# Create root LV (40GB)"
+      - "sudo lvcreate -L 40G -n root vg0"
+      - ""
+      - "# Create var LV (200GB)"
+      - "sudo lvcreate -L 200G -n var vg0"
+      - ""
+      - "# Create home LV (100GB)"
+      - "sudo lvcreate -L 100G -n home vg0"
+      - ""
+      - "# Verify Logical Volumes"
+      - "sudo lvdisplay"
+      - "sudo lvs"
+      - ""
+      - "# Check free space (should show ~657GB free)"
+      - "sudo vgdisplay vg0 | grep Free"
+
+  step_09_format_logical_volumes:
+    description: "Format Logical Volumes with ext4"
+    commands:
+      - "# Format root LV"
+      - "sudo mkfs.ext4 -L root /dev/vg0/root"
+      - ""
+      - "# Format var LV"
+      - "sudo mkfs.ext4 -L var /dev/vg0/var"
+      - ""
+      - "# Format home LV"
+      - "sudo mkfs.ext4 -L home /dev/vg0/home"
+
+  step_10_mount_filesystems:
+    description: "Mount filesystems for installation"
+    commands:
+      - "# Mount root"
+      - "sudo mount /dev/vg0/root /mnt"
+      - ""
+      - "# Create mount point directories"
+      - "sudo mkdir -p /mnt/boot"
+      - "sudo mkdir -p /mnt/boot/efi"
+      - "sudo mkdir -p /mnt/var"
+      - "sudo mkdir -p /mnt/home"
+      - ""
+      - "# Mount boot"
+      - "sudo mount /dev/nvme0n1p2 /mnt/boot"
+      - ""
+      - "# Mount EFI"
+      - "sudo mount /dev/nvme0n1p1 /mnt/boot/efi"
+      - ""
+      - "# Mount var"
+      - "sudo mount /dev/vg0/var /mnt/var"
+      - ""
+      - "# Mount home"
+      - "sudo mount /dev/vg0/home /mnt/home"
+      - ""
+      - "# Verify mounts"
+      - "df -h"
+      - "lsblk"
+
+  step_11_get_uuids:
+    description: "Get UUIDs for fstab configuration"
+    commands:
+      - "# Display all UUIDs"
+      - "sudo blkid"
+      - ""
+      - "# Or get specific UUIDs:"
+      - "sudo blkid /dev/nvme0n1p1  # EFI"
+      - "sudo blkid /dev/nvme0n1p2  # boot"
+      - "sudo blkid /dev/vg0/root   # root"
+      - "sudo blkid /dev/vg0/var    # var"
+      - "sudo blkid /dev/vg0/home   # home"
+      - ""
+      - "# Copy these UUIDs for fstab configuration"
+
+  step_12_configure_fstab:
+    description: "Configure /etc/fstab (after base system installation)"
+    note: "Edit /mnt/etc/fstab during installation or /etc/fstab on running system"
+    commands:
+      - "sudo nano /mnt/etc/fstab"
+    
+    fstab_content: |
+      # /etc/fstab: static file system information
+      # <file system>                           <mount point>  <type>  <options>              <dump>  <pass>
+
+      # Root filesystem
+      UUID=<root-uuid>                          /              ext4    errors=remount-ro      0       1
+
+      # Boot partition
+      UUID=<boot-uuid>                          /boot          ext4    defaults               0       2
+
+      # EFI System Partition
+      UUID=<efi-uuid>                           /boot/efi      vfat    umask=0077             0       1
+
+      # Var partition
+      UUID=<var-uuid>                           /var           ext4    defaults               0       2
+
+      # Home partition
+      UUID=<home-uuid>                          /home          ext4    defaults               0       2
+
+      # Swap file (will be created in step 13)
+      /swapfile                                 none           swap    sw                     0       0
+
+    fstab_alternative_using_device_mapper: |
+      # Alternative: Using device mapper paths instead of UUIDs
+      /dev/mapper/vg0-root    /          ext4    errors=remount-ro    0    1
+      /dev/nvme0n1p2          /boot      ext4    defaults             0    2
+      /dev/nvme0n1p1          /boot/efi  vfat    umask=0077           0    1
+      /dev/mapper/vg0-var     /var       ext4    defaults             0    2
+      /dev/mapper/vg0-home    /home      ext4    defaults             0    2
+      /swapfile               none       swap    sw                   0    0
+
+  step_13_create_swap_file:
+    description: "Create and configure swap file (after installation)"
+    note: "Perform this after system installation is complete and system is booted"
+    commands:
+      - "# Create 8GB swap file using fallocate"
+      - "sudo fallocate -l 8G /swapfile"
+      - ""
+      - "# Set correct permissions (important for security)"
+      - "sudo chmod 600 /swapfile"
+      - ""
+      - "# Format as swap"
+      - "sudo mkswap /swapfile"
+      - ""
+      - "# Enable swap"
+      - "sudo swapon /swapfile"
+      - ""
+      - "# Verify swap is active"
+      - "sudo swapon --show"
+      - "free -h"
+      - ""
+      - "# Ensure swap file entry is in /etc/fstab (from step 12)"
+      - "grep swapfile /etc/fstab"
+
+  step_14_configure_swappiness:
+    description: "Configure swappiness for 64GB RAM system"
+    commands:
+      - "# Check current swappiness"
+      - "cat /proc/sys/vm/swappiness"
+      - ""
+      - "# Set swappiness to 10 (minimal swap usage)"
+      - "sudo sysctl vm.swappiness=10"
+      - ""
+      - "# Make it permanent"
+      - "echo 'vm.swappiness=10' | sudo tee -a /etc/sysctl.conf"
+      - ""
+      - "# Verify"
+      - "cat /proc/sys/vm/swappiness"
+
+  step_15_install_ubuntu_base_system:
+    description: "Install Ubuntu Server base system (if manual installation)"
+    note: "Use debootstrap or Ubuntu installer with manual partitioning"
+    commands:
+      - "# If using Ubuntu installer, select 'Manual partitioning'"
+      - "# Point installer to use mounted filesystems"
+      - ""
+      - "# Or use debootstrap for minimal installation:"
+      - "sudo debootstrap jammy /mnt http://archive.ubuntu.com/ubuntu"
+      - ""
+      - "# Continue with standard Ubuntu installation procedures"
+
+  step_16_final_verification:
+    description: "Verify complete setup after reboot"
+    commands:
+      - "# Check all mounts"
+      - "df -h"
+      - "lsblk"
+      - "mount | grep -E '(nvme|mapper)'"
+      - ""
+      - "# Verify LVM setup"
+      - "sudo pvs"
+      - "sudo vgs"
+      - "sudo lvs"
+      - ""
+      - "# Check swap"
+      - "sudo swapon --show"
+      - "free -h"
+      - ""
+      - "# Verify fstab"
+      - "sudo findmnt --verify"
+      - ""
+      - "# Check boot configuration"
+      - "sudo update-grub"
+      - "sudo update-initramfs -u"
+
+post_installation:
+  enable_trim_for_nvme:
+    description: "Enable TRIM support for NVMe SSD longevity"
+    commands:
+      - "# Enable fstrim timer (recommended for SSDs)"
+      - "sudo systemctl enable fstrim.timer"
+      - "sudo systemctl start fstrim.timer"
+      - ""
+      - "# Verify timer is active"
+      - "sudo systemctl status fstrim.timer"
+      - ""
+      - "# Or add 'discard' option to fstab mount options for continuous TRIM"
+      - "# Example: UUID=xxx / ext4 errors=remount-ro,discard 0 1"
+
+  monitoring_setup:
+    description: "Set up monitoring for disk usage and swap"
+    commands:
+      - "# Install monitoring tools"
+      - "sudo apt install htop iotop ncdu -y"
+      - ""
+      - "# Monitor disk usage"
+      - "df -h"
+      - "sudo lvs"
+      - ""
+      - "# Monitor swap usage"
+      - "free -h"
+      - "vmstat 5"
+      - ""
+      - "# Check I/O statistics"
+      - "iostat -x 5"
+
+lvm_management:
+  extending_logical_volumes:
+    description: "How to extend a logical volume when needed"
+    
+    example_extend_var:
+      scenario: "Extend /var by 50GB"
+      commands:
+        - "# Check available free space"
+        - "sudo vgdisplay vg0 | grep Free"
+        - ""
+        - "# Extend the logical volume"
+        - "sudo lvextend -L +50G /dev/vg0/var"
+        - ""
+        - "# Resize the filesystem"
+        - "sudo resize2fs /dev/vg0/var"
+        - ""
+        - "# Verify new size"
+        - "df -h /var"
+        - "sudo lvs"
+
+    example_extend_to_use_all_free:
+      scenario: "Extend /home to use all remaining free space"
+      commands:
+        - "# Extend using all free space in VG"
+        - "sudo lvextend -l +100%FREE /dev/vg0/home"
+        - ""
+        - "# Resize filesystem"
+        - "sudo resize2fs /dev/vg0/home"
+        - ""
+        - "# Verify"
+        - "df -h /home"
+
+  creating_new_logical_volumes:
+    description: "Create new logical volumes from free space"
+    
+    example_docker_volume:
+      scenario: "Create 100GB volume for Docker data"
+      commands:
+        - "# Create new LV"
+        - "sudo lvcreate -L 100G -n docker vg0"
+        - ""
+        - "# Format it"
+        - "sudo mkfs.ext4 -L docker /dev/vg0/docker"
+        - ""
+        - "# Create mount point and mount"
+        - "sudo mkdir -p /var/lib/docker"
+        - "sudo mount /dev/vg0/docker /var/lib/docker"
+        - ""
+        - "# Add to fstab"
+        - "echo '/dev/mapper/vg0-docker  /var/lib/docker  ext4  defaults  0  2' | sudo tee -a /etc/fstab"
+        - ""
+        - "# Verify"
+        - "df -h /var/lib/docker"
+
+  shrinking_logical_volumes:
+    description: "Shrink a logical volume (be careful!)"
+    warning: "DANGEROUS: Always backup before shrinking! Requires unmounting."
+    commands:
+      - "# Example: Shrink /home by 20GB"
+      - "# 1. Backup all data first!"
+      - ""
+      - "# 2. Unmount the filesystem"
+      - "sudo umount /home"
+      - ""
+      - "# 3. Check filesystem"
+      - "sudo e2fsck -f /dev/vg0/home"
+      - ""
+      - "# 4. Resize filesystem first (make it smaller)"
+      - "sudo resize2fs /dev/vg0/home 80G"
+      - ""
+      - "# 5. Reduce LV size"
+      - "sudo lvreduce -L 80G /dev/vg0/home"
+      - ""
+      - "# 6. Remount"
+      - "sudo mount /home"
+
+  snapshots:
+    description: "Create LVM snapshots for backups or testing"
+    commands:
+      - "# Create snapshot of root before system upgrade"
+      - "sudo lvcreate -L 10G -s -n root_snapshot /dev/vg0/root"
+      - ""
+      - "# List snapshots"
+      - "sudo lvs"
+      - ""
+      - "# Mount snapshot to view/recover files"
+      - "sudo mkdir /mnt/snapshot"
+      - "sudo mount /dev/vg0/root_snapshot /mnt/snapshot -o ro"
+      - ""
+      - "# Restore from snapshot if needed (careful!)"
+      - "sudo lvconvert --merge /dev/vg0/root_snapshot"
+      - "# System needs reboot to complete merge"
+      - ""
+      - "# Remove snapshot when done"
+      - "sudo umount /mnt/snapshot"
+      - "sudo lvremove /dev/vg0/root_snapshot"
+
+swap_management:
+  resize_swap_file:
+    description: "Resize swap file (much easier than LVM swap partition)"
+    
+    increase_to_16gb:
+      commands:
+        - "# Turn off current swap"
+        - "sudo swapoff /swapfile"
+        - ""
+        - "# Remove old swap file"
+        - "sudo rm /swapfile"
+        - ""
+        - "# Create new 16GB swap file"
+        - "sudo fallocate -l 16G /swapfile"
+        - "sudo chmod 600 /swapfile"
+        - ""
+        - "# Format and enable"
+        - "sudo mkswap /swapfile"
+        - "sudo swapon /swapfile"
+        - ""
+        - "# Verify"
+        - "free -h"
+        - "sudo swapon --show"
+
+    decrease_to_4gb:
+      commands:
+        - "sudo swapoff /swapfile"
+        - "sudo rm /swapfile"
+        - "sudo fallocate -l 4G /swapfile"
+        - "sudo chmod 600 /swapfile"
+        - "sudo mkswap /swapfile"
+        - "sudo swapon /swapfile"
+        - "free -h"
+
+  temporary_additional_swap:
+    description: "Add temporary swap during heavy workload"
+    commands:
+      - "# Create temporary 16GB swap"
+      - "sudo fallocate -l 16G /tmp/emergency-swap"
+      - "sudo chmod 600 /tmp/emergency-swap"
+      - "sudo mkswap /tmp/emergency-swap"
+      - "sudo swapon /tmp/emergency-swap"
+      - ""
+      - "# Verify total swap"
+      - "sudo swapon --show"
+      - "free -h"
+      - ""
+      - "# Remove when workload completes"
+      - "sudo swapoff /tmp/emergency-swap"
+      - "sudo rm /tmp/emergency-swap"
+
+  monitor_swap_usage:
+    description: "Monitor swap usage to determine if size is adequate"
+    commands:
+      - "# Current swap usage"
+      - "free -h"
+      - "cat /proc/swaps"
+      - ""
+      - "# Real-time monitoring"
+      - "watch -n 1 free -h"
+      - ""
+      - "# Check swap activity"
+      - "vmstat 5"
+      - ""
+      - "# Historical swap usage (if sysstat installed)"
+      - "sar -S"
+
+verification_commands:
+  quick_health_check:
+    description: "Quick commands to verify system health"
+    commands:
+      - "# Overall disk usage"
+      - "df -h"
+      - ""
+      - "# LVM status"
+      - "sudo pvs && sudo vgs && sudo lvs"
+      - ""
+      - "# Memory and swap"
+      - "free -h"
+      - ""
+      - "# All mounts"
+      - "mount | grep -E '(nvme|mapper|swap)'"
+      - ""
+      - "# Verify fstab entries"
+      - "sudo findmnt --verify"
+
+  detailed_information:
+    commands:
+      - "# Detailed LVM info"
+      - "sudo pvdisplay"
+      - "sudo vgdisplay"
+      - "sudo lvdisplay"
+      - ""
+      - "# Block device tree"
+      - "lsblk -f"
+      - ""
+      - "# Disk I/O statistics"
+      - "iostat -x"
+      - ""
+      - "# Filesystem usage details"
+      - "df -hT"
+      - ""
+      - "# Inode usage"
+      - "df -i"
+
+troubleshooting:
+  common_issues:
+    lvm_not_found_at_boot:
+      problem: "System doesn't boot - LVM volumes not found"
+      solutions:
+        - "Boot from live USB"
+        - "sudo vgscan"
+        - "sudo vgchange -ay"
+        - "sudo mount /dev/vg0/root /mnt"
+        - "sudo mount --bind /dev /mnt/dev"
+        - "sudo mount --bind /proc /mnt/proc"
+        - "sudo mount --bind /sys /mnt/sys"
+        - "sudo chroot /mnt"
+        - "update-initramfs -u"
+        - "update-grub"
+        - "exit"
+        - "reboot"
+
+    swap_file_not_activated:
+      problem: "Swap file not activated at boot"
+      solutions:
+        - "# Check fstab entry"
+        - "grep swapfile /etc/fstab"
+        - ""
+        - "# Verify file exists and has correct permissions"
+        - "ls -lh /swapfile"
+        - "# Should be -rw------- (600)"
+        - ""
+        - "# Manually activate"
+        - "sudo swapon /swapfile"
+        - ""
+        - "# If permission error:"
+        - "sudo chmod 600 /swapfile"
+        - "sudo swapon /swapfile"
+
+    disk_space_full:
+      problem: "/var or / is full"
+      solutions:
+        - "# Find largest directories"
+        - "sudo du -sh /var/* | sort -rh | head -10"
+        - ""
+        - "# Clean package cache"
+        - "sudo apt clean"
+        - "sudo apt autoremove"
+        - ""
+        - "# Clean old logs"
+        - "sudo journalctl --vacuum-time=7d"
+        - ""
+        - "# If still full, extend LV"
+        - "sudo lvextend -L +50G /dev/vg0/var"
+        - "sudo resize2fs /dev/vg0/var"
+
+    accidentally_filled_root:
+      problem: "Root partition full, but have free space in VG"
+      solutions:
+        - "# Extend root LV"
+        - "sudo lvextend -L +20G /dev/vg0/root"
+        - "sudo resize2fs /dev/vg0/root"
+        - ""
+        - "# Verify"
+        - "df -h /"
+
+best_practices:
+  - "Leave 15-20% of VG space unallocated for flexibility"
+  - "Monitor /var regularly on servers (Docker, logs can grow quickly)"
+  - "Take LVM snapshots before major system changes"
+  - "Enable automatic TRIM for SSD longevity"
+  - "Keep swap file size modest with 64GB RAM (8-16GB sufficient)"
+  - "Use UUIDs in fstab for reliability across reboots"
+  - "Regular backups of /home and critical /var data"
+  - "Monitor swap usage - if consistently high, you need more RAM"
+  - "Use lvs, vgs, pvs commands regularly to track space usage"
+  - "Document any changes to LVM layout"
+
+useful_references:
+  commands:
+    lvm_overview: "sudo lvs && sudo vgs && sudo pvs"
+    disk_usage: "df -h && sudo lvs"
+    memory_swap: "free -h && sudo swapon --show"
+    block_devices: "lsblk -f"
+    mount_points: "mount | column -t"
+  
+  documentation:
+    - "Ubuntu LVM Guide: https://ubuntu.com/server/docs/lvm"
+    - "LVM2 Documentation: man lvm"
+    - "Swap Management: man swapon, man mkswap"
+    - "fstab Documentation: man fstab"
+
+additional_notes:
+  advantages_of_this_setup:
+    - "Maximum flexibility with LVM for future growth"
+    - "Swap file allows easy resizing without LVM complexity"
+    - "Separate /var prevents logs from filling root"
+    - "Separate /home allows OS reinstallation without data loss"
+    - "657GB unallocated space for future needs"
+    - "Boot partitions outside LVM for compatibility"
+    - "UEFI-compatible with proper ESP setup"
+
+  when_to_extend_volumes:
+    root: "When / reaches 80% capacity"
+    var: "When Docker containers or logs grow beyond 160GB (80% of 200GB)"
+    home: "When user data approaches 80GB"
+    create_new: "For dedicated services (databases, Docker, web servers)"
+
+  swap_file_vs_partition_summary:
+    swap_file_advantages:
+      - "Easily resizable (seconds vs minutes)"
+      - "Can create multiple swap files temporarily"
+      - "No LVM space commitment"
+      - "Modern Ubuntu default"
+      - "Hibernation supported (kernel 5.0+)"
+    
+    swap_partition_advantages:
+      - "Slightly more traditional"
+      - "Visible in LVM tools"
+      - "Consistent with LVM setup"
+    
+    performance: "Negligible difference on NVMe drives"
+    recommendation: "Use swap file for maximum flexibility"
+
+gpu_notes:
+  nvidia_rtx_5060_ti:
+    vram: "16GB"
+    vram_management: "Managed separately by NVIDIA driver"
+    swap_impact: "GPU VRAM does not affect system swap sizing"
+    driver_installation: "Install nvidia-driver-XXX package after system setup"
+    cuda_support: "Install nvidia-cuda-toolkit if needed for ML/AI workloads"
+    monitoring: "Use nvidia-smi to monitor GPU memory usage"
+
+final_checklist:
+  - "✓ Verified device name (/dev/nvme0n1)"
+  - "✓ Created GPT partition table"
+  - "✓ Created EFI, boot, and LVM partitions"
+  - "✓ Initialized LVM PV, VG, and LVs"
+  - "✓ Formatted all filesystems"
+  - "✓ Configured /etc/fstab with correct UUIDs"
+  - "✓ Created and activated 8GB swap file"
+  - "✓ Set swappiness to 10"
+  - "✓ Enabled fstrim.timer for SSD maintenance"
+  - "✓ Verified all mounts after reboot"
+  - "✓ Tested LVM commands (lvs, vgs, pvs)"
+  - "✓ Documented setup for future reference"
+
+---
+# End of Ubuntu Server 1TB NVMe LVM Setup Guide
